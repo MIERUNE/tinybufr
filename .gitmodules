@@ -1,0 +1,9 @@
+[submodule "BUFR4"]
+	path = BUFR4
+	url = https://github.com/wmo-im/BUFR4.git
+[submodule "tables/tables"]
+	path = tables/tables
+	url = https://github.com/wmo-im/BUFR4.git
+[submodule "tables/BUFR4"]
+	path = tables/BUFR4
+	url = https://github.com/wmo-im/BUFR4.git
