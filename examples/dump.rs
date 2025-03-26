@@ -44,7 +44,6 @@ fn main() {
     // Parse data section
     let data_spec =
         DataSpec::from_data_description(&header.data_description_section, &tables).unwrap();
-    println!("Data spec: {:#?}", data_spec);
     let mut data_reader = DataReader::new(&mut reader, &data_spec).unwrap();
 
     loop {
@@ -66,9 +65,7 @@ fn main() {
             Ok(DataEvent::Eof) => {
                 break;
             }
-            Ok(ev) => {
-                println!("{:?}", ev);
-            }
+            Ok(_) => {}
             Err(e) => {
                 eprintln!("Error: {:?}", e);
                 return;

@@ -13,11 +13,12 @@ pub struct DataReader<'a, R: Read> {
     data_spec: &'a DataSpec<'a>,
     current_subset_idx: u16,
     reader: BitReader<R, BigEndian>,
-    stack: smallvec::SmallVec<[SequenceStackEntry<'a>; 5]>,
+    stack: smallvec::SmallVec<[StackEntry<'a>; 8]>,
     temporary_operator: Option<XY>,
     scale_offset: i8,
 }
 
+#[derive(Debug)]
 pub struct DataSpec<'a> {
     pub number_of_subsets: u16,
     pub is_compressed: bool,
@@ -55,26 +56,33 @@ impl<'a, R: BinReaderExt> DataReader<'a, R> {
     }
 }
 
-struct SequenceStackEntry<'a> {
+struct StackEntry<'a> {
     descriptors: &'a [ResolvedDescriptor<'a>],
     next: u16,
-    replications: smallvec::SmallVec<[ReplicationStackEntry; 3]>,
+    entry_type: StackEntryType,
 }
 
-impl<'a> SequenceStackEntry<'a> {
-    fn new(descriptors: &'a [ResolvedDescriptor<'a>]) -> Self {
+enum StackEntryType {
+    Sequence,
+    Replication { remaining: u16 },
+}
+
+impl<'a> StackEntry<'a> {
+    fn new_sequence(descriptors: &'a [ResolvedDescriptor<'a>]) -> Self {
         Self {
             descriptors,
             next: 0,
-            replications: smallvec::SmallVec::new(),
+            entry_type: StackEntryType::Sequence,
         }
     }
-}
 
-struct ReplicationStackEntry {
-    remaining: u16,
-    begin: u16,
-    end: u16,
+    fn new_replication(descriptors: &'a [ResolvedDescriptor<'a>], count: u16) -> Self {
+        Self {
+            descriptors,
+            next: descriptors.len() as u16,
+            entry_type: StackEntryType::Replication { remaining: count },
+        }
+    }
 }
 
 fn three_bytes_to_u32(bytes: (u8, u8, u8)) -> u32 {
@@ -159,7 +167,7 @@ impl<'a, R: Read> DataReader<'a, R> {
             }
 
             self.stack
-                .push(SequenceStackEntry::new(&self.data_spec.root_descriptors));
+                .push(StackEntry::new_sequence(&self.data_spec.root_descriptors));
             let subset_idx = self.current_subset_idx;
             self.current_subset_idx += 1;
             if !self.data_spec.is_compressed {
@@ -171,23 +179,20 @@ impl<'a, R: Read> DataReader<'a, R> {
 
     fn process_next_descriptor(&mut self) -> Result<DataEvent, Error> {
         let top = self.stack.last_mut().expect("Stack should not be empty");
-
-        // Check if we are in a replication
-        if let Some(rep) = top.replications.last_mut() {
-            if top.next == rep.end {
-                if rep.remaining > 0 {
-                    rep.remaining -= 1;
-                    top.next = rep.begin;
+        if let StackEntryType::Replication { remaining } = &mut top.entry_type {
+            if top.next as usize >= top.descriptors.len() {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    top.next = 0;
                     return Ok(DataEvent::ReplicationItem);
                 } else {
-                    top.next = rep.end;
-                    top.replications.pop();
+                    self.stack.pop();
                     return Ok(DataEvent::ReplicationEnd);
                 }
             }
-        }
+        };
 
-        if top.next >= top.descriptors.len() as u16 {
+        if top.next as usize >= top.descriptors.len() {
             self.stack.pop();
             return match (self.stack.last(), self.data_spec.is_compressed) {
                 (Some(_), _) => Ok(DataEvent::SequenceEnd),
@@ -196,12 +201,17 @@ impl<'a, R: Read> DataReader<'a, R> {
             };
         }
 
-        let desc = &top.descriptors[top.next as usize];
+        let descriptors = &top.descriptors;
+        let current_desc = &descriptors[top.next as usize];
         let idx = top.next;
         top.next += 1;
-        match desc {
+        match current_desc {
             ResolvedDescriptor::Data(b) => self.handle_data_descriptor(idx, b),
-            ResolvedDescriptor::Replication(xy) => self.handle_replication_descriptor(idx, *xy),
+            ResolvedDescriptor::Replication {
+                y,
+                descriptors,
+                delayed_bits,
+            } => self.handle_replication_descriptor(idx, *y, descriptors, *delayed_bits),
             ResolvedDescriptor::Operator(xy) => self.handle_operator_descriptor(idx, *xy),
             ResolvedDescriptor::Sequence(d, elements) => {
                 self.handle_sequence_descriptor(idx, d, elements)
@@ -298,43 +308,20 @@ impl<'a, R: Read> DataReader<'a, R> {
     }
 
     // f = 1
-    fn handle_replication_descriptor(&mut self, idx: u16, xy: XY) -> Result<DataEvent, Error> {
-        let top = self.stack.last_mut().expect("Stack should not be empty");
-        let count = match xy.y {
-            0 => {
-                // TODO: range check
-                let ResolvedDescriptor::Data(rep_desc) = &top.descriptors[top.next as usize] else {
-                    return Err(Error::Fatal(format!(
-                        "Replication descriptor not found for xy: {:?}",
-                        xy
-                    )));
-                };
-                top.next += 1;
-                match rep_desc.xy {
-                    XY { x: 31, y: 0 } => self.reader.read::<u16>(1)?,
-                    XY { x: 31, y: 1 } => self.reader.read::<u16>(8)?,
-                    XY { x: 31, y: 2 } => self.reader.read::<u16>(16)?,
-                    XY { x: 31, y: 3 } => self.reader.read::<u16>(8)?, // Note: JMA-local?
-                    _ => {
-                        return Err(Error::Fatal(format!(
-                            "Unsupported delayed descriptor replication factor: {:#?}",
-                            rep_desc
-                        )));
-                    }
-                }
-            }
-            count => count as u16,
+    fn handle_replication_descriptor(
+        &mut self,
+        idx: u16,
+        y: u8,
+        elements: &'a [ResolvedDescriptor<'_>],
+        delayed_bits: u8,
+    ) -> Result<DataEvent, Error> {
+        let count = match y {
+            0 => self.reader.read::<u16>(delayed_bits as u32)?,
+            _ => y as u16,
         };
-        top.replications.push(ReplicationStackEntry {
-            begin: top.next,
-            end: top.next + xy.x as u16,
-            remaining: count,
-        });
-        top.next += xy.x as u16;
-        Ok(DataEvent::ReplicationStart {
-            idx,
-            count: count as u16,
-        })
+        self.stack
+            .push(StackEntry::new_replication(elements, count));
+        Ok(DataEvent::ReplicationStart { idx, count })
     }
 
     // f = 2
@@ -364,11 +351,7 @@ impl<'a, R: Read> DataReader<'a, R> {
         d: &TableDEntry,
         elements: &'a [ResolvedDescriptor<'_>],
     ) -> Result<DataEvent, Error> {
-        self.stack.push(SequenceStackEntry {
-            descriptors: elements,
-            next: 0,
-            replications: smallvec::SmallVec::new(),
-        });
+        self.stack.push(StackEntry::new_sequence(elements));
         Ok(DataEvent::SequenceStart { idx, xy: d.xy })
     }
 }
