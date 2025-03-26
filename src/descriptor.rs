@@ -48,7 +48,11 @@ pub struct XY {
 #[derive(Debug)]
 pub enum ResolvedDescriptor<'a> {
     Data(&'a TableBEntry),
-    Replication(XY),
+    Replication {
+        y: u8,
+        delayed_bits: u8,
+        descriptors: Vec<ResolvedDescriptor<'a>>,
+    },
     Operator(XY),
     Sequence(&'a TableDEntry, Vec<ResolvedDescriptor<'a>>),
 }
@@ -65,7 +69,7 @@ impl<'a> ResolvedDescriptor<'a> {
                 };
                 ResolvedDescriptor::Data(b)
             }
-            1 => ResolvedDescriptor::Replication(desc.xy()),
+            1 => unreachable!(),
             2 => ResolvedDescriptor::Operator(desc.xy()),
             3 => {
                 let Some(d) = tables.table_d.get(&desc.xy()) else {
@@ -91,8 +95,44 @@ pub(crate) fn resolve_descriptors<'a>(
     tables: &Tables,
     descriptors: &'a [Descriptor],
 ) -> Result<Vec<ResolvedDescriptor<'a>>, Error> {
-    descriptors
-        .iter()
-        .map(|desc| ResolvedDescriptor::from_descriptor(desc, tables))
-        .collect::<Result<Vec<ResolvedDescriptor<'a>>, _>>()
+    let mut resolved = vec![];
+    let mut pos = 0;
+    while pos < descriptors.len() {
+        match &descriptors[pos] {
+            &Descriptor { f: 1, x, y } => {
+                let delayed_bits = match y {
+                    // delayed replication when YYY = 0
+                    0 => {
+                        pos += 1;
+                        match descriptors[pos] {
+                            Descriptor { f: 0, x: 31, y: 0 } => 1,
+                            Descriptor { f: 0, x: 31, y: 1 } => 8,
+                            Descriptor { f: 0, x: 31, y: 2 } => 16,
+                            Descriptor { f: 0, x: 31, y: 3 } => 8, // Note: JMA-local?
+                            desc => {
+                                return Err(Error::Fatal(format!(
+                                    "Unsupported delayed descriptor replication factor: {:#?}",
+                                    desc
+                                )));
+                            }
+                        }
+                    }
+                    _ => 0,
+                };
+                pos += 1;
+                resolved.push(ResolvedDescriptor::Replication {
+                    y,
+                    descriptors: resolve_descriptors(tables, &descriptors[pos..pos + x as usize])?,
+                    delayed_bits,
+                });
+                pos += x as usize;
+            }
+            desc => {
+                resolved.push(ResolvedDescriptor::from_descriptor(desc, tables)?);
+                pos += 1;
+            }
+        }
+    }
+
+    Ok(resolved)
 }
