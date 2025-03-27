@@ -120,6 +120,9 @@ pub(crate) fn resolve_descriptors<'a>(
                     _ => 0,
                 };
                 pos += 1;
+                if pos + x as usize > descriptors.len() {
+                    return Err(Error::Fatal("Replication range out of bounds".to_string()));
+                }
                 resolved.push(ResolvedDescriptor::Replication {
                     y,
                     descriptors: resolve_descriptors(tables, &descriptors[pos..pos + x as usize])?,

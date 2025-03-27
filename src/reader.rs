@@ -64,7 +64,7 @@ struct StackEntry<'a> {
 
 enum StackEntryType {
     Sequence,
-    Replication { remaining: u16 },
+    Replication { remaining: u16, in_item: bool },
 }
 
 impl<'a> StackEntry<'a> {
@@ -80,7 +80,10 @@ impl<'a> StackEntry<'a> {
         Self {
             descriptors,
             next: descriptors.len() as u16,
-            entry_type: StackEntryType::Replication { remaining: count },
+            entry_type: StackEntryType::Replication {
+                remaining: count,
+                in_item: false,
+            },
         }
     }
 }
@@ -100,12 +103,14 @@ pub struct DataSectionHeader {
 pub enum DataEvent {
     SubsetStart(u16),
     SubsetEnd,
+    CompressedStart,
     ReplicationStart {
         idx: u16,
         count: u16,
     },
+    ReplicationItemStart,
+    ReplicationItemEnd,
     ReplicationEnd,
-    ReplicationItem,
     SequenceStart {
         idx: u16,
         xy: XY,
@@ -170,7 +175,9 @@ impl<'a, R: Read> DataReader<'a, R> {
                 .push(StackEntry::new_sequence(&self.data_spec.root_descriptors));
             let subset_idx = self.current_subset_idx;
             self.current_subset_idx += 1;
-            if !self.data_spec.is_compressed {
+            if self.data_spec.is_compressed {
+                return Ok(DataEvent::CompressedStart);
+            } else {
                 return Ok(DataEvent::SubsetStart(subset_idx));
             }
         }
@@ -179,12 +186,17 @@ impl<'a, R: Read> DataReader<'a, R> {
 
     fn process_next_descriptor(&mut self) -> Result<DataEvent, Error> {
         let top = self.stack.last_mut().expect("Stack should not be empty");
-        if let StackEntryType::Replication { remaining } = &mut top.entry_type {
+        if let StackEntryType::Replication { remaining, in_item } = &mut top.entry_type {
             if top.next as usize >= top.descriptors.len() {
+                if *in_item {
+                    *in_item = false;
+                    return Ok(DataEvent::ReplicationItemEnd);
+                }
                 if *remaining > 0 {
                     *remaining -= 1;
                     top.next = 0;
-                    return Ok(DataEvent::ReplicationItem);
+                    *in_item = true;
+                    return Ok(DataEvent::ReplicationItemStart);
                 } else {
                     self.stack.pop();
                     return Ok(DataEvent::ReplicationEnd);
