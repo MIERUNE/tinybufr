@@ -16,6 +16,10 @@ struct Args {
     /// Skip first line of input
     #[arg(short, long)]
     skip_first_line: bool,
+
+    /// Decode only the handler sections
+    #[arg(short, long)]
+    only_header: bool,
 }
 
 type Subsets = Vec<Sequence>;
@@ -63,6 +67,14 @@ fn main() -> Result<(), Error> {
 
     // Parse header sections
     let header = HeaderSections::read(&mut reader)?;
+
+    if args.only_header {
+        let Ok(json) = serde_json::to_string_pretty(&header) else {
+            return Err(Error::Fatal("Failed to serialize to JSON".to_string()));
+        };
+        println!("{}", json);
+        return Ok(());
+    }
 
     // Parse data section
     let data_spec = DataSpec::from_data_description(&header.data_description_section, &tables)?;
