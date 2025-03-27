@@ -87,6 +87,7 @@ fn read_example(filename: &str, skip_first_line: bool) {
     let mut subset_counter = 0;
     let mut sequence_counter = 0;
     let mut replication_counter = 0;
+    let mut replication_item_counter = 0;
 
     loop {
         match data_reader.read_event() {
@@ -96,6 +97,7 @@ fn read_example(filename: &str, skip_first_line: bool) {
             Ok(DataEvent::SubsetEnd) => {
                 subset_counter -= 1;
                 assert_eq!(sequence_counter, 0);
+                assert_eq!(replication_item_counter, 0);
             }
             Ok(DataEvent::SequenceStart { .. }) => {
                 sequence_counter += 1;
@@ -105,13 +107,24 @@ fn read_example(filename: &str, skip_first_line: bool) {
                 assert_eq!(replication_counter, 0);
             }
             Ok(DataEvent::ReplicationStart { .. }) => {
+                println!("Replication start");
                 replication_counter += 1;
             }
-            Ok(DataEvent::ReplicationItem) => {}
+            Ok(DataEvent::ReplicationItemStart) => {
+                println!("Replication item start");
+                replication_item_counter += 1;
+            }
+            Ok(DataEvent::ReplicationItemEnd) => {
+                println!("Replication item end");
+                replication_item_counter -= 1;
+            }
             Ok(DataEvent::ReplicationEnd) => {
+                println!("Replication end");
                 replication_counter -= 1;
             }
-            Ok(DataEvent::Data { .. }) => {}
+            Ok(DataEvent::Data { .. }) => {
+                println!("Data");
+            }
             Ok(DataEvent::CompressedData { .. }) => {}
             Ok(DataEvent::Eof) => {
                 assert_eq!(subset_counter, 0);
